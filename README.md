@@ -1,0 +1,283 @@
+# PII Shield 🛡️
+### 100% Local, Privacy-Preserving Business Document PII Pipeline
+
+> **Client Context**: Cadence Financial Services  
+> **Mandate**: Enterprise policy strictly prohibits raw Personally Identifiable Information (PII) from being ingested by external Large Language Models (LLMs) or cloud services. All detection, redaction, and auditing must run 100% locally with zero cloud API dependencies, zero external telemetry, and an auditable fail-closed safety gate.
+
+---
+
+## Key Features
+
+- **100% Local Execution**: Powered by PyMuPDF, python-docx, python-pptx, OpenCV, Tesseract OCR, Presidio Analyzer, and spaCy (`en_core_web_lg`). No cloud OCR, no external model calls.
+- **Fail-Closed Security**: Documents or pages that cannot be parsed safely (corrupted files, empty files, or OCR confidence below threshold) emit explicit `BLOCKED` chunks rather than passing unverified text downstream.
+- **Multi-Layer Detection Engine**:
+  - **Regex Rules & Specialized Validators**: High-precision patterns with mathematical verification:
+    - Credit Card: Luhn algorithm check (ISO/IEC 7812)
+    - Aadhaar: Verhoeff algorithm check digit
+    - IBAN: ISO 7064 mod-97 check
+    - SSN: Area number validity (rejects 000, 666, 900–999) & group/serial sanity
+    - IPv4: Octet boundaries (0–255)
+  - **Local Named Entity Recognition (NER)**: Microsoft Presidio backed by spaCy transformer/statistical models for high-recall identification of person names.
+  - **Context-Aware Boost**: Column-header boosting in tables (`"Employee Name"` header boosts cell confidence by 1.2x) and prefix patterns (`"Approved by:"`).
+  - **Character-Confusion Candidate Normalization (`detect/ocr_repair.py`)**: Recovers OCR-garbled digits (`S`→`5`, `O`→`0`, `l`→`1`, `B`→`8`, `Z`→`2`, `G`→`6`) and email TLDs (`.cam`/`.corn`→`.com`) mathematically validated via Luhn, Verhoeff, and SSN sanity checks.
+  - **Document-Level Name Alias Propagation (`detect/propagate.py`)**: Case-sensitive propagation of confirmed person surnames, first names, and initials across document chunks with organizational stoplist gating and per-document caps.
+  - **Low-Confidence OCR Fail-Closed Redaction (`detect/suspect.py`)**: Gap-only detection redacting PII-shaped tokens on low-confidence OCR lines (`< 70` conf) without overriding typed entities.
+  - **Span Merge & Conflict Resolution**: Priority-aware overlap resolution (typed entities always supersede suspect tokens), greedy span union, and deduplication.
+- **Deterministic & Reversible Redaction**:
+  - Replaces PII with uniform placeholder tokens (`[PERSON_1]`, `[EMAIL_1]`).
+  - Identical raw entities receive identical placeholders across document chunks.
+  - Offsets replaced right-to-left to prevent coordinate drift.
+  - Encrypted mapping store at rest using authenticated symmetric Fernet encryption (`AES-128-CBC` + `HMAC-SHA256`) with key isolation and automated secure purge (`atexit`).
+- **Post-Redaction Leakage Verification**:
+  - Automatically re-scans redacted text through the entire detection suite with known-value propagation.
+  - If any residual PII is detected, the document is flagged `downstream_safe: false` and prevented from reaching any LLM.
+- **Zero-Raw-PII Audit Report**:
+  - Produces CSV and JSON audit summaries containing masked values (e.g. `J*****h`), entity types, sensitivity levels, and confidence scores. Never discloses raw PII.
+- **Interactive Gradio UI & Browser Extension**:
+  - Four-tab Gradio interface for uploading files, inspecting chunks, viewing masked PII, and downloading sanitized outputs.
+  - Chromium browser extension with floating prompt shield (`Ctrl+Shift+S`) and inline DOM restore for ChatGPT, Claude, and Gemini via a local bridge server (`127.0.0.1:8765`).
+
+---
+
+## Directory Layout
+
+```
+c:\D Drive\OCR\pii_shield\
+├── app/
+│   └── gradio_app.py          # Interactive 4-tab Gradio interface (bound to 127.0.0.1)
+├── config.yaml                # Profiles (strict/balanced), thresholds, entities, alias stoplists
+├── detect/
+│   ├── context.py             # Table header boost & labelled prefix rules
+│   ├── merge.py               # Span union, greedy overlap resolution, dedup, priority
+│   ├── ner.py                 # Presidio + spaCy NER wrapper
+│   ├── ocr_repair.py          # Character-confusion normalization & TLD repair
+│   ├── propagate.py           # Case-sensitive name alias propagation across chunks
+│   ├── rules.py               # Compiled regex library for 14+ PII types
+│   ├── suspect.py             # Low-confidence OCR fail-closed redaction (gap-only)
+│   └── validators.py          # Luhn, Verhoeff, IBAN, SSN, IPv4 validators
+├── evaluate.py                # End-to-end benchmark evaluator & 6-stage ablation CLI
+├── extension/                 # Chromium browser extension (manifest v3, content scripts, popup)
+├── extension_server/          # Local HTTP bridge server (127.0.0.1:8765) for browser extension
+├── extract/
+│   ├── docx.py                # Paragraphs, tables, headers/footers, footnotes, images
+│   ├── models.py              # Chunk dataclass (text, method, confidence, location)
+│   ├── ocr.py                 # Deskew, adaptive threshold, Tesseract runner
+│   ├── pdf.py                 # PyMuPDF native extractor with 300 DPI OCR fallback
+│   ├── pptx.py                # Slide shapes, tables, speaker notes, images
+│   └── router.py              # Magic-byte and extension-based dispatch
+├── ground_truth_issues.md     # Documented synthetic data anomalies & physical omissions
+├── notebooks/
+│   └── demo.ipynb             # Interactive end-to-end Jupyter walkthrough
+├── redact/
+│   ├── mapping.py             # Encrypted (AES-128-CBC) raw ↔ placeholder mapping store
+│   └── redactor.py            # Right-to-left token replacer preserving table structure
+├── report/
+│   └── report.py              # Zero-raw-PII CSV, JSON, and summary table generator
+├── synthetic/
+│   ├── generate.py            # Faker-driven generator for PDF, DOCX, PPTX test docs
+│   └── ground_truth/          # Annotated JSON ground truth & expected plain text
+├── synthetic_holdout/         # Completely unseen test set (Seed 99) for no-regression checks
+├── tests/
+│   ├── conftest.py            # Shared pytest fixtures
+│   ├── ocr_repair_cases.json  # Targeted OCR repair test fixture
+│   ├── test_detection.py      # Rule, NER, context boost, alias & precision guard tests
+│   ├── test_extractors.py     # PDF, DOCX, and PPTX extractor tests
+│   ├── test_fail_closed.py    # Corrupt, empty, unsupported, and low-conf tests
+│   ├── test_leakage.py        # Post-redaction safety gate tests
+│   ├── test_merge.py          # Span overlap and conflict resolution tests
+│   ├── test_redaction.py      # Consistent token and table preservation tests
+│   └── test_validators.py     # Unit tests for mathematical check algorithms
+├── verify/
+│   ├── leakage.py             # Re-detection safety scanner
+│   └── metrics.py             # Precision, Recall, F1, and structure retention
+├── requirements.txt           # Pinned Python package dependencies
+├── COLAB.md                   # Google Colab / Linux reproduction guide
+└── README.md                  # This file
+```
+
+---
+
+## Installation & Setup
+
+1. **Clone or navigate to the workspace**:
+   ```bash
+   cd "c:\D Drive\OCR\pii_shield"
+   ```
+
+2. **Install Python dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Install Tesseract OCR engine (Windows)**:
+   - Automated via winget:
+     ```bash
+     winget install --id UB-Mannheim.TesseractOCR --silent
+     ```
+   - Standard installation installs to `C:\Program Files\Tesseract-OCR\tesseract.exe`. The pipeline automatically auto-detects this binary.
+
+4. **Install spaCy local model**:
+   ```bash
+   python -m spacy download en_core_web_lg
+   ```
+
+---
+
+## Quickstart
+
+### 1. Generate Synthetic Test Documents
+```bash
+python synthetic/generate.py
+```
+This generates three complex test documents in `synthetic/` along with ground-truth annotations in `synthetic/ground_truth/`:
+- `scanned_policy.pdf`: Multi-page scanned document with OCR noise, skewed text, and metadata PII.
+- `training_guide.docx`: Rich document containing tables, headers, footers, footnotes, and embedded screenshots.
+- `org_pack.pptx`: Presentation with org directory tables, speaker notes, and grouped diagram elements.
+
+### 2. Launch the Gradio Web Application
+```bash
+python -m app.gradio_app
+```
+Open `http://localhost:7860` in your browser:
+- **Tab 1: Extracted Text**: Inspect extracted chunks with exact document locations (`page:1`, `table:1/r2c3`, `slide:3/notes`).
+- **Tab 2: Detected PII**: Review the detected PII inventory with sensitivity ratings, confidence scores, and detection methods. (Raw values are masked).
+- **Tab 3: Redacted Text**: Review sanitized content with replaced placeholders highlighted.
+- **Tab 4: Audit Report**: Download audit reports (CSV/JSON) and redacted text archives. Check the **Downstream LLM Safe** badge.
+
+### 3. Run End-to-End Benchmark Evaluation
+Run the comprehensive evaluation pipeline with throughput measurement, file-level audit tables, and leakage verification:
+```bash
+# Evaluate on synthetic development set (/synthetic)
+python evaluate.py --input synthetic
+
+# Evaluate on completely unseen hold-out set (/synthetic_holdout)
+python evaluate.py --input synthetic_holdout
+
+# Run the 6-stage component ablation experiment
+python evaluate.py --input synthetic --ablation
+```
+
+#### Latest Measured Benchmark Performance
+| Dataset | True Positives | False Positives | False Negatives | Precision | Recall | F1 Score | Confirmed Leaks | Structure Retention |
+|---|---|---|---|---|---|---|---|---|
+| **Synthetic (`/synthetic`)** | 89 | 8 | 6 | **0.9175** | **0.9368** | **0.9271** | **0 (Safe ✅)** | ≥ 0.89 per file ✅ |
+| **Hold-out (`/synthetic_holdout`)** | 36 | 4 | 4 | **0.9000** | **0.9000** | **0.9000** | **0 (Safe ✅)** | ≥ 0.89 per file ✅ |
+
+### 4. Run Pytest Suite
+```bash
+pytest -q
+```
+Executes **315 unit and integration tests** across validators, extractors, detection rules, OCR repair, name alias propagation, precision guards, redaction engines, leakage verifiers, and fail-closed mechanisms (**315 passed / 0 failed**).
+
+---
+
+## Architecture & Detection Pipeline
+
+```
+Raw Document (PDF / DOCX / PPTX / Image)
+                 │
+                 ▼
+        [ extract/router.py ]
+          (Magic-byte check)
+                 │
+  ┌──────────────┼──────────────┬──────────────┐
+  ▼              ▼              ▼              ▼
+[ pdf.py ]   [ docx.py ]    [ pptx.py ]    [ ocr.py ]
+(Native/OCR) (DOM & images) (Slides/Notes) (Deskew/Filter)
+  │              │              │              │
+  └──────────────┴──────┬───────┴──────────────┘
+                        │
+                        ▼
+                 List of [ Chunk ]
+     (location, text, method, ocr_conf, blocked)
+                        │
+                        ▼
+       [ detect/merge.py :: detect_chunk ]
+  ┌─────────────────────┼─────────────────────┐
+  ▼                     ▼                     ▼
+[ rules.py ]       [ ner.py ]           [ context.py ]
+Regex + Validators Presidio + spaCy      Header / prefix boost
+  │                     │                     │
+  └─────────────────────┼─────────────────────┘
+                        │
+                        ▼
+             Span Overlap Resolution
+                        │
+                        ▼
+                 List of [ Entity ]
+                        │
+                        ▼
+            [ redact/redactor.py ]
+          (Right-to-left replacement)
+                        │
+        ┌───────────────┴───────────────┐
+        ▼                               ▼
+ [ Redacted Chunks ]          [ mapping.py Store ]
+        │                       (Never sent to LLM)
+        ▼
+ [ verify/leakage.py ]
+  (Re-scan safety gate)
+        │
+   Downstream Safe?
+   ├─ YES ──► Emit sanitized text for LLM ingestion
+   └─ NO  ──► Block downstream transfer & log alert
+        │
+        ▼
+ [ report/report.py ]
+ (Zero-raw-PII audit report: CSV / JSON)
+```
+
+---
+
+## Browser Extension (Use with Real LLMs like ChatGPT, Claude, Gemini)
+
+PII Shield includes a Chromium/Chrome/Edge browser extension that automatically shields your prompts and restores real values in AI replies:
+
+### 1. Start the Local Bridge Server
+Run:
+```bash
+python -m extension_server.server
+```
+or double-click `run_extension_bridge.bat`. The bridge listens securely on `http://127.0.0.1:8765`.
+
+### 2. Load Extension in Chrome / Edge / Brave
+1. Open your browser and navigate to `chrome://extensions` (or `edge://extensions`).
+2. Toggle on **Developer mode** (top right switch).
+3. Click **"Load unpacked"**.
+4. Select the folder: `extension`.
+
+### 3. Usage on ChatGPT / Claude / Gemini
+- **In-Place Shielding**: When typing into any prompt box on ChatGPT, Claude, or Gemini, click the floating **"🛡️ Shield PII"** button or press **`Ctrl+Shift+S`**. PII is replaced instantly with tokens (`[PERSON_1]`, `[EMAIL_1]`).
+- **In-Place Restoration**: When the LLM replies referencing tokens (e.g., `"[PERSON_1] should contact [EMAIL_1]"`), click the inline **"🔓 Restore PII"** pill to decode the placeholders back to original names and numbers right on the webpage.
+- **Extension Popup**: Click the PII Shield icon in your extension bar for a standalone prompt redactor, document sanitizer (drag-and-drop PDF/DOCX/PPTX), and session viewer.
+
+---
+
+## Known Limitations & Edge Cases
+
+1. **Vector Graphics with Embedded Text (EMF / WMF)**:
+   - Older Word documents may embed drawings or charts as Windows Metafiles (EMF/WMF). Without native Windows GDI rendering, these images cannot be converted to bitmap raster for OCR. PII Shield safely emits a `BLOCKED` chunk for unsupported formats.
+2. **Severely Distorted / Highly Rotated Scans**:
+   - The OpenCV deskew filter corrects skew within $\pm 45^\circ$. Inverted or sideways pages ($90^\circ / 180^\circ$) require orientation detection (`tesseract --psm 0`). Pages where mean word confidence drops below the configured threshold (default: 40.0) are marked `BLOCKED`.
+3. **Complex Multi-Column Layouts**:
+   - In image-only PDFs with dense multi-column layouts, standard horizontal block reading order can occasionally interleave across column gutters. Using PyMuPDF block layout sorting mitigates this for native PDFs.
+4. **LOCATION Entity Sensitivity**:
+   - Detecting geographic locations has a high false-positive rate on corporate entity names (e.g., "Cadence Financial" or "Dallas Asset Management"). `LOCATION` detection is disabled by default in `config.yaml` to optimize precision.
+
+---
+
+## Threat Model & Mapping File Security
+
+### Threat Model
+The core security guarantee of PII Shield is that **raw Personally Identifiable Information never leaves the local perimeter unencrypted or unmasked**:
+- **External AI Services & Downstream LLMs**: Receive ONLY uniform placeholder tokens (`[PERSON_1]`, `[EMAIL_1]`). The fail-closed leakage verification scanner ensures that zero residual PII is passed downstream.
+- **Audit Logs & Telemetry**: Every audit log, summary report (CSV/JSON), and Gradio UI view contains only masked values (`J*****h`). Raw values are guaranteed never to appear in logs or reports.
+- **At-Rest Encryption**: The mapping store (`*_mapping.json`), which associates placeholders with raw values, is **encrypted at rest** using Fernet authenticated symmetric encryption (`cryptography` package, AES-128-CBC with HMAC-SHA256).
+- **Key Isolation & Permissions**: Session encryption keys are held in memory by default. If saved to disk, keys are placed in an isolated directory (`~/.pii_shield_keys`), never adjacent to mapping files, and protected by owner-only permissions (`0600` on POSIX; on Windows NTFS, access is restricted to the current user).
+- **Secure Purge**: Mappings and keys are automatically wiped at process exit by default, or immediately via the Gradio UI "🗑️ Purge" button and CLI purge flags. File contents are overwritten with `os.urandom` bytes before unlinking to eliminate storage residue.
+
+### How Restore Works
+1. **Browser Extension / Local Bridge**: When an LLM responds with placeholder tokens (`[PERSON_1] should email [EMAIL_1]`), the extension sends the text to the local bridge server (`POST /restore_text`). The bridge matches tokens against the in-memory session mapping in descending token-length order and replaces them with original text directly in the browser DOM.
+2. **Programmatic Restoration**: An authorized local pipeline can decrypt mapping files using `PlaceholderMapping(..., key=...).load()`.
+3. **Purge on Exit**: When the pipeline or Gradio server terminates, `atexit` securely destroys active mapping files and resets session keys.
+
